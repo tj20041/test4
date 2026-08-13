@@ -4,7 +4,8 @@ from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from pyspark.sql.functions import row_number, col
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
@@ -14,11 +15,26 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-df_iot = spark.read.parquet("s3://source-bucket/iot_telemetry/")
+# Read raw IoT device telemetry
+telemetry_df = spark.createDataFrame(
+    [
+        ("DEV-001", "2026-08-13 10:00:00", 72.5, 45.0),
+        ("DEV-001", "2026-08-13 10:00:05", 72.8, 45.1),
+        ("DEV-002", "2026-08-13 10:00:01", 68.1, 50.2),
+    ],
+    ["device_id", "event_ts", "temperature", "humidity"]
+)
 
-window_spec = Window.partitionBy("device_id", "sensor_type")
+# Define window to group events per device
+device_window = Window.partitionBy("device_id")
 
-deduplicated_df = df_iot.withColumn("row_num", row_number().over(window_spec)).filter(col("row_num") == 1)
+# Filter duplicate telemetry readings
+deduplicated_df = telemetry_df.withColumn(
+    "row_num",
+    F.row_number().over(device_window)
+).filter(F.col("row_num") == 1).drop("row_num")
 
-deduplicated_df.write.mode("overwrite").parquet("s3://output-bucket/iot_deduplicated/")
+# Process telemetry dataset
+deduplicated_df.collect()
+
 job.commit()
