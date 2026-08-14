@@ -7,6 +7,7 @@ from awsglue.job import Job
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+from pyspark.errors.exceptions.captured import AnalysisException
 
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
 sc = SparkContext()
@@ -25,16 +26,28 @@ telemetry_df = spark.createDataFrame(
     ["device_id", "event_ts", "temperature", "humidity"]
 )
 
-# Define window to group events per device
-device_window = Window.partitionBy("device_id")
+# Cast event_ts from string to TimestampType for correct temporal ordering semantics
+telemetry_df = telemetry_df.withColumn(
+    "event_ts",
+    F.to_timestamp(F.col("event_ts"), "yyyy-MM-dd HH:mm:ss")
+)
 
-# Filter duplicate telemetry readings
-deduplicated_df = telemetry_df.withColumn(
-    "row_num",
-    F.row_number().over(device_window)
-).filter(F.col("row_num") == 1).drop("row_num")
+# Define window to group events per device, ordered by event_ts descending
+# so that the most recent telemetry record per device is assigned row_num = 1
+device_window = Window.partitionBy("device_id").orderBy(F.col("event_ts").desc())
 
-# Process telemetry dataset
-deduplicated_df.collect()
+# Filter duplicate telemetry readings, keeping only the latest record per device
+try:
+    deduplicated_df = telemetry_df.withColumn(
+        "row_num",
+        F.row_number().over(device_window)
+    ).filter(F.col("row_num") == 1).drop("row_num")
+
+    # Process telemetry dataset
+    deduplicated_df.collect()
+
+except AnalysisException as e:
+    glueContext.get_logger().error(f"Window spec error in deduplication block: {e}")
+    raise
 
 job.commit()
