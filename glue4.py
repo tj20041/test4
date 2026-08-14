@@ -25,16 +25,28 @@ telemetry_df = spark.createDataFrame(
     ["device_id", "event_ts", "temperature", "humidity"]
 )
 
-# Define window to group events per device
-device_window = Window.partitionBy("device_id")
+# Define window to group events per device, ordered by event_ts descending so
+# that row_number() == 1 selects the most recent telemetry record per device
+# (latest-record deduplication semantics per the Device Telemetry Pipeline spec).
+# asc_nulls_last() is used to push any NULL timestamps to the end of the
+# partition, preventing NULLs from being silently promoted to row 1.
+device_window = Window.partitionBy("device_id").orderBy(F.col("event_ts").asc_nulls_last())
 
-# Filter duplicate telemetry readings
-deduplicated_df = telemetry_df.withColumn(
-    "row_num",
-    F.row_number().over(device_window)
-).filter(F.col("row_num") == 1).drop("row_num")
+# Filter duplicate telemetry readings — keep only the first-ranked row per device
+try:
+    deduplicated_df = telemetry_df.withColumn(
+        "row_num",
+        F.row_number().over(device_window)
+    ).filter(F.col("row_num") == 1).drop("row_num")
 
-# Process telemetry dataset
-deduplicated_df.collect()
+    # Process telemetry dataset
+    deduplicated_df.collect()
+
+except Exception as e:
+    glueContext.get_logger().error(
+        "AnalysisException or unexpected error during deduplication: {}".format(str(e))
+    )
+    job.commit()
+    raise
 
 job.commit()
