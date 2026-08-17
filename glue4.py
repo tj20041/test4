@@ -12,6 +12,7 @@ args = getResolvedOptions(sys.argv, ['JOB_NAME'])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
+logger = glueContext.get_logger()
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
@@ -25,16 +26,34 @@ telemetry_df = spark.createDataFrame(
     ["device_id", "event_ts", "temperature", "humidity"]
 )
 
-# Define window to group events per device
-device_window = Window.partitionBy("device_id")
+# Cast event_ts from string to TimestampType for correct temporal ordering
+telemetry_df = telemetry_df.withColumn("event_ts", F.to_timestamp(F.col("event_ts")))
 
-# Filter duplicate telemetry readings
-deduplicated_df = telemetry_df.withColumn(
-    "row_num",
-    F.row_number().over(device_window)
-).filter(F.col("row_num") == 1).drop("row_num")
+# Define window to group events per device, ordered by event_ts descending
+# so that row_number() == 1 selects the MOST RECENT telemetry record per device
+# (Gold-layer latest-state monitoring intent per Device Telemetry Pipeline spec)
+device_window = Window.partitionBy("device_id").orderBy(F.col("event_ts").desc())
 
-# Process telemetry dataset
-deduplicated_df.collect()
+try:
+    # Filter duplicate telemetry readings, keeping the most recent record per device
+    deduplicated_df = telemetry_df.withColumn(
+        "row_num",
+        F.row_number().over(device_window)
+    ).filter(F.col("row_num") == 1).drop("row_num")
+
+    # Process telemetry dataset
+    results = deduplicated_df.collect()
+    logger.info(
+        f"[glue4] Deduplication complete. "
+        f"Output row count: {len(results)}"
+    )
+except Exception as e:
+    logger.error(
+        f"[glue4] Deduplication step failed. "
+        f"Error: {str(e)}"
+    )
+    raise RuntimeError(
+        "Telemetry deduplication failed — see preceding error log for details."
+    ) from e
 
 job.commit()
