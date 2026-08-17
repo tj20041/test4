@@ -25,10 +25,20 @@ telemetry_df = spark.createDataFrame(
     ["device_id", "event_ts", "temperature", "humidity"]
 )
 
-# Define window to group events per device
-device_window = Window.partitionBy("device_id")
+# Cast event_ts from StringType to TimestampType for correct temporal ordering.
+# Lexicographic string ordering works for ISO-8601 strings but is fragile;
+# an explicit cast ensures correctness if the upstream format ever changes.
+telemetry_df = telemetry_df.withColumn(
+    "event_ts",
+    F.to_timestamp(F.col("event_ts"), "yyyy-MM-dd HH:mm:ss")
+)
 
-# Filter duplicate telemetry readings
+# Define window to group events per device, ordered by event_ts descending
+# so that row_num = 1 corresponds to the most recent telemetry record per device.
+# row_number() requires an ORDER BY clause; omitting it raises AnalysisException.
+device_window = Window.partitionBy("device_id").orderBy(F.col("event_ts").desc())
+
+# Filter duplicate telemetry readings, keeping only the latest event per device
 deduplicated_df = telemetry_df.withColumn(
     "row_num",
     F.row_number().over(device_window)
