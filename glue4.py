@@ -25,16 +25,29 @@ telemetry_df = spark.createDataFrame(
     ["device_id", "event_ts", "temperature", "humidity"]
 )
 
-# Define window to group events per device
-device_window = Window.partitionBy("device_id")
+# Define window to group events per device.
+# row_number() is an order-sensitive ranking function and REQUIRES a
+# deterministic orderBy() clause on the Window spec, otherwise Spark raises
+# an AnalysisException at DAG execution time (GEN-UNCLASSIFIED-ERROR).
+# We order by event_ts ascending so the earliest reading per device gets
+# row_num == 1, with temperature as a tiebreaker to guarantee full
+# determinism when two events share the exact same timestamp.
+device_window = Window.partitionBy("device_id").orderBy(
+    F.col("event_ts").asc(),
+    F.col("temperature").asc()
+)
 
-# Filter duplicate telemetry readings
+# Filter duplicate telemetry readings, keeping the earliest reading per device
 deduplicated_df = telemetry_df.withColumn(
     "row_num",
     F.row_number().over(device_window)
 ).filter(F.col("row_num") == 1).drop("row_num")
 
-# Process telemetry dataset
-deduplicated_df.collect()
+# Persist the deduplicated telemetry dataset to S3 instead of collect().
+# collect() pulls all rows to the driver and is unsafe for real IoT
+# telemetry volumes in production Glue jobs (risk of driver OOM).
+deduplicated_df.write.mode("overwrite").parquet(
+    "s3://your-bucket/output/deduplicated_telemetry/"
+)
 
 job.commit()
